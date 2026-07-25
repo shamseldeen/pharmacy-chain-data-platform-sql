@@ -52,20 +52,44 @@ def export_ddl_to_file(output_filename: str = "bronze_schema_generation.sql", sc
             # Iterate through the inferred structural properties of each column
             for col_name in df_sample.columns:
                 col_type = df_sample[col_name].dtype
-                col_name_lower = col_name.lower()
                 
                 # RULE-BASED STRUCTURAL DATATYPE MAPPER
                 if "int" in str(col_type):
                     sql_type = "INT"
                 elif "float" in str(col_type):
                     sql_type = "FLOAT(53)"
-                elif "datetime" in str(col_type) or "date" in col_name_lower or "time" in col_name_lower:
-                    sql_type = "DATE"
                 else:
-                    sql_type = "NVARCHAR(50)"  # Catch-all safe default for text and categorical data
+                    # Filter non-null entries for actual content validation
+                    non_null_series = df_sample[col_name].dropna()
+                    is_date = False
                     
-                # Append the formatted table field script string
-                ddl_lines.append(f"\t{col_name} {sql_type}")
+                    if not non_null_series.empty:
+                        try:
+                            # Attempt parsing values as datetime; raises an exception if invalid text is present
+                            pd.to_datetime(non_null_series, errors="raise")
+                            is_date = True
+                        except (ValueError, TypeError, OverflowError):
+                            is_date = False
+
+                    if is_date or "datetime" in str(col_type):
+                        sql_type = "DATE"
+                    else:
+                        # DYNAMIC TEXT SIZING: Calculate max string length to optimize database memory & storage
+                        if not non_null_series.empty:
+                            max_len = non_null_series.astype(str).str.len().max()
+                        else:
+                            max_len = 0
+
+                        # Memory allocation tiers based on observed data dimensions
+                        if max_len <= 50:
+                            sql_type = "NVARCHAR(50)"
+                        elif max_len <= 255:
+                            sql_type = "NVARCHAR(255)"
+                        else:
+                            sql_type = "NVARCHAR(MAX)"
+                    
+                # Append formatted column string with brackets to handle spaces/reserved words safely
+                ddl_lines.append(f"\t[{col_name}] {sql_type}")
                 
             # Compile column arrays into a structured SQL string block
             columns_ddl = ",\n".join(ddl_lines)
