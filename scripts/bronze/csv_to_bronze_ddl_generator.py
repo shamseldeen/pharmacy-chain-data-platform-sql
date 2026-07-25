@@ -88,8 +88,8 @@ def export_ddl_to_file(output_filename: str = "bronze_schema_generation.sql", sc
                         else:
                             sql_type = "NVARCHAR(MAX)"
                     
-                # Append formatted column string with brackets to handle spaces/reserved words safely
-                ddl_lines.append(f"\t[{col_name}] {sql_type}")
+                # Exact column name preservation to guarantee 1:1 mapping for BULK INSERT
+                ddl_lines.append(f"\t{col_name} {sql_type}")
                 
             # Compile column arrays into a structured SQL string block
             columns_ddl = ",\n".join(ddl_lines)
@@ -111,3 +111,5 @@ def export_ddl_to_file(output_filename: str = "bronze_schema_generation.sql", sc
 # --- SCRIPT EXECUTION BLOCK ---
 if __name__ == "__main__":
     export_ddl_to_file()
+
+    
