@@ -1,83 +1,124 @@
 """
-Data Engineering Migration Tool: Dynamic SQL Injector
+Data Engineering Automation Tool: SQL Server DDL Schema Generator
 Author: Junior Data Engineer
 Reviewed by: Senior Python Developer
 
 Description:
-This script opens an existing .sql file, automatically identifies all 'CREATE TABLE'
-statements, extracts the table names, and injects an 'IF OBJECT_ID ... DROP TABLE' 
-idempotency block directly above each creation script.
+This script scans a directory for flat CSV files, infers their table schemas
+using pandas, and dynamically writes a structured, executable SQL Server (.sql) 
+script with 'DROP TABLE IF EXISTS' logic for idempotent migrations.
 """
 
 import os
+import glob
 import re
+import pandas as pd
 
-def inject_drop_checks_into_sql(input_file: str, output_file: str) -> None:
+# Regex pattern to strictly match full ISO dates (YYYY-MM-DD)
+FULL_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+def export_ddl_to_file(output_filename: str = "bronze_schema_generation.sql", schema_name: str = "bronze") -> None:
     """
-    Opens an existing SQL script, scans for table names, and writes a new 
-    SQL script with structural drop-checks injected before every table creation.
+    Scans local directory for CSV files, determines data layout rules,
+    and exports a combined, clean SQL Server 'CREATE TABLE' script file
+    with conditional safety drops before each creation block.
     """
-    # Force alignment of the directory path with the script's physical location
+    # CRITICAL: Force Python execution context to align with the script's physical location.
     try:
         os.chdir(os.path.dirname(os.path.abspath(__file__)))
     except NameError:
-        pass
+        pass  # Gracefully handle interactive runtime environments like Jupyter Notebooks
 
-    # Ensure that the target file to be modified actually exists
-    if not os.path.exists(input_file):
-        print(f"❌ Error: The source file '{input_file}' was not found.")
+    # Retrieve all local files ending with the .csv file extension
+    csv_files = glob.glob("./*.csv")
+    if not csv_files:
+        print("❌ Error: No source CSV files found to generate the script.")
         return
 
-    # Read the full content of the old SQL file using UTF-8 encoding
-    with open(input_file, "r", encoding="utf-8") as f:
-        sql_content = f.read()
-
-    # Regex Pattern: Looks for "CREATE TABLE schema.table_name" statements
-    # It extracts the full table name into a variable block (Group 1)
-    # \s+ matches one or more spaces, and ([\w.]+) captures the schema and table name
-    table_pattern = re.compile(r"CREATE\s+TABLE\s+([\w.]+)", re.IGNORECASE)
-
-    # Initialize an array to accumulate the modified lines for the new file
-    modified_sql_lines = []
-    
-    # Split the raw script string into individual lines to inspect them one by one
-    lines = sql_content.splitlines()
-    tables_updated_count = 0
-
-    for line in lines:
-        # Check if the current line matches the table creation syntax pattern
-        match = table_pattern.search(line)
+    # Open/Create the target .sql file using a Context Manager to guarantee safe memory flushing
+    with open(output_filename, "w", encoding="utf-8") as sql_file:
         
-        if match:
-            # Extract the raw, clean table name (e.g., bronze.customers) from the match object
-            table_name = match.group(1)
+        # Inject standard structural database headers at the top of the script
+        sql_file.write("/* ====================================================\n")
+        sql_file.write(f"   AUTOMATICALLY GENERATED DDL FOR SCHEMA: {schema_name}\n")
+        sql_file.write("   ==================================================== */\n\n")
+
+        # Loop through each individual discovered CSV file path
+        for file_path in csv_files:
+            # Isolate the bare file string name (e.g., extracts 'customers' from './customers.csv')
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            table_name = f"{schema_name}.{base_name}"
             
-            # Construct the dynamic conditional block using the captured table string asset
+            # MEMORY OPTIMIZATION: Read only the first 50 rows. 
+            df_sample = pd.read_csv(file_path, nrows=50)
+            
+            ddl_lines = []
+            # Iterate through the inferred structural properties of each column
+            for col_name in df_sample.columns:
+                col_type = df_sample[col_name].dtype
+                
+                # RULE-BASED STRUCTURAL DATATYPE MAPPER
+                if "int" in str(col_type):
+                    sql_type = "INT"
+                elif "float" in str(col_type):
+                    sql_type = "FLOAT(53)"
+                else:
+                    non_null_series = df_sample[col_name].dropna()
+                    is_date = False
+
+                    if not non_null_series.empty:
+                        sample_values = non_null_series.astype(str).head(20)  # Quick pattern check on a subset
+
+                        # STEP 1: Structural check FIRST — only proceed to pd.to_datetime if every
+                        # sampled value actually looks like a COMPLETE date (YYYY-MM-DD).
+                        # This rejects partial values like "2024-03" (year-month only) before
+                        # pd.to_datetime gets a chance to "fill in" a fake day and fool us.
+                        looks_like_full_date = sample_values.str.match(FULL_DATE_PATTERN).all()
+
+                        if looks_like_full_date:
+                            try:
+                                pd.to_datetime(non_null_series, errors="raise")
+                                is_date = True
+                            except (ValueError, TypeError, OverflowError):
+                                is_date = False
+
+                    if is_date or "datetime" in str(col_type):
+                        sql_type = "DATE"
+                    else:
+                        # DYNAMIC TEXT SIZING: Calculate max string length to optimize database memory & storage
+                        if not non_null_series.empty:
+                            max_len = non_null_series.astype(str).str.len().max()
+                        else:
+                            max_len = 0
+
+                        # Memory allocation tiers based on observed data dimensions
+                        if max_len <= 50:
+                            sql_type = "NVARCHAR(50)"
+                        elif max_len <= 255:
+                            sql_type = "NVARCHAR(255)"
+                        else:
+                            sql_type = "NVARCHAR(MAX)"
+                    
+                # Exact column name preservation to guarantee 1:1 mapping for BULK INSERT
+                ddl_lines.append(f"\t{col_name} {sql_type}")
+                
+            # Compile column arrays into a structured SQL string block
+            columns_ddl = ",\n".join(ddl_lines)
+            
+            # DYNAMIC CHECK BLOCK: Generates the safe conditional drop statement for this specific table
             drop_check = (
                 f"IF OBJECT_ID ('{table_name}', 'U') IS NOT NULL\n"
                 f"\tDROP TABLE {table_name};\n"
             )
             
-            # Inject the drop constraint into the array directly before the current CREATE TABLE line
-            modified_sql_lines.append(drop_check)
-            tables_updated_count += 1
+            # Combine the drop block and create block into one executable script unit
+            create_statement = f"{drop_check}CREATE TABLE {table_name} (\n{columns_ddl}\n);\n\n"
             
-        # Append the original file line as-is (whether it was a CREATE statement or standard script text)
-        modified_sql_lines.append(line)
+            # Commit the full block directly to the physical .sql file
+            sql_file.write(create_statement)
+            
+    print(f"💾 Success! Created layout script: '{output_filename}' ({len(csv_files)} tables written).")
 
-    # Merge the modified array items and write them into a completely new SQL asset file
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("\n".join(modified_sql_lines))
-
-    print(f"🚀 Success! Modified script saved to: '{output_file}'")
-    print(f"🛠️ Injected {tables_updated_count} dynamic drop-check structures into the code.")
-
-# --- Script Execution Block ---
+# --- SCRIPT EXECUTION BLOCK ---
 if __name__ == "__main__":
-    # Specify the name of your old, unautomated SQL file residing in this folder
-    old_file = "handNotAutomated.sql" 
-    
-    # Name the new file output asset that will house your idempotent schema scripts
-    new_file = "idempotent_schema_generation.sql"
-    
-    inject_drop_checks_into_sql(old_file, new_file)
+    export_ddl_to_file()
