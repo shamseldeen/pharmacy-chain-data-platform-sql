@@ -1,7 +1,7 @@
 """
 Data Engineering Automation Tool: SQL Server DDL Schema Generator
-Author: Junior Data Engineer
-Reviewed by: Senior Python Developer
+Author: Junior Data Analyst
+Reviewed by: Gemini AI Senior Python Developer
 
 Description:
 This script scans a directory for flat CSV files, infers their table schemas
@@ -11,7 +11,11 @@ script with 'DROP TABLE IF EXISTS' logic for idempotent migrations.
 
 import os
 import glob
+import re
 import pandas as pd
+
+# Regex pattern to strictly match full ISO dates (YYYY-MM-DD)
+FULL_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 def export_ddl_to_file(output_filename: str = "bronze_schema_generation.sql", schema_name: str = "bronze") -> None:
     """
@@ -59,17 +63,24 @@ def export_ddl_to_file(output_filename: str = "bronze_schema_generation.sql", sc
                 elif "float" in str(col_type):
                     sql_type = "FLOAT(53)"
                 else:
-                    # Filter non-null entries for actual content validation
                     non_null_series = df_sample[col_name].dropna()
                     is_date = False
-                    
+
                     if not non_null_series.empty:
-                        try:
-                            # Attempt parsing values as datetime; raises an exception if invalid text is present
-                            pd.to_datetime(non_null_series, errors="raise")
-                            is_date = True
-                        except (ValueError, TypeError, OverflowError):
-                            is_date = False
+                        sample_values = non_null_series.astype(str).head(20)  # Quick pattern check on a subset
+
+                        # STEP 1: Structural check FIRST — only proceed to pd.to_datetime if every
+                        # sampled value actually looks like a COMPLETE date (YYYY-MM-DD).
+                        # This rejects partial values like "2024-03" (year-month only) before
+                        # pd.to_datetime gets a chance to "fill in" a fake day and fool us.
+                        looks_like_full_date = sample_values.str.match(FULL_DATE_PATTERN).all()
+
+                        if looks_like_full_date:
+                            try:
+                                pd.to_datetime(non_null_series, errors="raise")
+                                is_date = True
+                            except (ValueError, TypeError, OverflowError):
+                                is_date = False
 
                     if is_date or "datetime" in str(col_type):
                         sql_type = "DATE"
@@ -110,6 +121,4 @@ def export_ddl_to_file(output_filename: str = "bronze_schema_generation.sql", sc
 
 # --- SCRIPT EXECUTION BLOCK ---
 if __name__ == "__main__":
-    export_ddl_to_file()
-
-    
+    export_ddl_to_file()    
